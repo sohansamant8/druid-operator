@@ -1,0 +1,47 @@
+{
+  "type": "kafka",
+  "dataSchema": {
+    "dataSource": "kafka-testing-topic",
+    "timestampSpec": {
+      "column": "time",
+      "format": "iso"
+    },
+    "dimensionsSpec": {
+      "dimensions": [
+        "page"
+      ]
+    },
+    "metricsSpec": [
+      {
+        "name": "count",
+        "type": "count"
+      },
+      {
+        "name": "loginCount",
+        "fieldName": "loginCount",
+        "type": "longSum"
+      }
+    ],
+    "granularitySpec": {
+      "type": "uniform",
+      "segmentGranularity": "HOUR",
+      "queryGranularity": "MINUTE"
+    }
+  },
+  "ioConfig": {
+    "topic": "kafka-testing-topic",
+    "inputFormat": {
+      "type": "json"
+    },
+    "consumerProperties": {
+      "bootstrap.servers": "kafka.kafka.svc.cluster.local:9092"
+    },
+    "taskCount": 1,
+    "replicas": 1,
+    "taskDuration": "PT1H"
+  },
+  "tuningConfig": {
+    "type": "kafka",
+    "maxRowsPerSegment": 5000000
+  }
+}

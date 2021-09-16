@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: test-volume
+  namespace: druid-testing
+  labels:
+    failure-domain.beta.kubernetes.io/zone: us-central1-a
+spec:
+  storageClassName: manual
+  capacity:
+    storage: 2Gi
+  accessModes:
+    - ReadOnlyMany
+  gcePersistentDisk:
+    pdName: my-data-disk
+    fsType: ext4

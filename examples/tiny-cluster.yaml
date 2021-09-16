@@ -4,31 +4,25 @@
 apiVersion: "druid.apache.org/v1alpha1"
 kind: "Druid"
 metadata:
-  name: tiny-cluster
+  name: druid-cluster
 spec:
+  commonConfigMountPath: "/opt/druid/conf/druid/cluster/_common"
+  rollingDeploy: true
   image: apache/druid:0.20.0
-  # Optionally specify image for all nodes. Can be specify on nodes also
-  # imagePullSecrets:
-  # - name: tutu
   startScript: /druid.sh
   podLabels:
-    environment: stage
+    environment: dev
     release: alpha
   podAnnotations:
     dummykey: dummyval
-  readinessProbe:
-    httpGet:
-      path: /status/health
-      port: 8088
   securityContext:
-    fsGroup: 1000
-    runAsUser: 1000
-    runAsGroup: 1000
+    fsGroup: 0
+    runAsUser: 0
+    runAsGroup: 0
   services:
     - spec:
         type: ClusterIP
         clusterIP: None
-  commonConfigMountPath: "/opt/druid/conf/druid/cluster/_common"
   jvm.options: |-
     -server
     -XX:MaxDirectMemorySize=10240g
@@ -37,51 +31,90 @@ spec:
     -Dlog4j.debug
     -Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager
     -Djava.io.tmpdir=/druid/data
+    -verbose:gc
+    -XX:+PrintGCDetails
+    -XX:+PrintGCTimeStamps
+    -XX:+PrintGCDateStamps
+    -XX:+PrintGCApplicationStoppedTime
+    -XX:+PrintGCApplicationConcurrentTime
+    -XX:+PrintAdaptiveSizePolicy
+    -XX:+PrintReferenceGC
+    -XX:+PrintFlagsFinal
   log4j.config: |-
     <?xml version="1.0" encoding="UTF-8" ?>
     <Configuration status="WARN">
         <Appenders>
             <Console name="Console" target="SYSTEM_OUT">
-                <PatternLayout pattern="%d{ISO8601} %p [%t] %c - %m%n"/>
+                <PatternLayout pattern="[%-5level] %d{yyyy-MM-dd HH:mm:ss.SSS} [%t] %c{1} - %msg%n" />
             </Console>
         </Appenders>
         <Loggers>
             <Root level="info">
                 <AppenderRef ref="Console"/>
             </Root>
+            <Logger name="org.apache.druid.jetty.RequestLog" additivity="false" level="INFO">
+              <AppenderRef ref="console"/>
+            </Logger>
         </Loggers>
     </Configuration>
   common.runtime.properties: |
+    ###############################################
+    # service names for coordinator and overlord
+    ###############################################
+    druid.selectors.indexing.serviceName=druid/overlord
+    druid.selectors.coordinator.serviceName=druid/coordinator
+    ##################################################
+    # Request logging, monitoring, and segment
+    ##################################################
+    druid.indexer.logs.type=file
+    druid.indexer.logs.directory=/druid/data/indexing-logs
+    druid.lookup.enableLookupSyncOnStartup=false
 
-    # Zookeeper
+    ################################################
+    # Extensions:
+    # Do we need extension directory: druid.extensions.directory=extensions/
+    ################################################
+    druid.extensions.loadList=["druid-kafka-indexing-service","druid-google-extensions","mysql-metadata-storage"]
+
+    ################################################
+    # SegmentMetadata queries: This returns metadata about pre-segment infomation
+    # This is a list of properties that determines the amount of information returned about the columns, i.e. analyses to be performed on the columns.
+    ################################################
+    druid.query.segmentMetadata.defaultAnalysisTypes=["cardinality","size","interval","minmax","timestampSpec"]
+
+    ####################################################
+    # Enable sql
+    ####################################################
+    druid.sql.enable=true
+
+    ####################################################
+    # Deep Storage
+    ####################################################
+    druid.storage.type=google
+    druid.google.bucket=com-metacx-dev-druid-deepstorage
+
+    ####################################################
+    # ZooKeeper
+    ####################################################
     druid.zk.service.host=tiny-cluster-zk-0.tiny-cluster-zk
     druid.zk.paths.base=/druid
     druid.zk.service.compress=false
 
+    ####################################################
     # Metadata Store
+    ####################################################
     druid.metadata.storage.type=derby
     druid.metadata.storage.connector.connectURI=jdbc:derby://localhost:1527/druid/data/derbydb/metadata.db;create=true
     druid.metadata.storage.connector.host=localhost
     druid.metadata.storage.connector.port=1527
     druid.metadata.storage.connector.createTables=true
 
-    # Deep Storage
-    druid.storage.type=local
-    druid.storage.storageDirectory=/druid/deepstorage
-    #
-    # Extensions
-    #
-    druid.extensions.loadList=["druid-kafka-indexing-service"]
+    #druid.metadata.storage.type=mysql
+    #druid.metadata.storage.connector.connectURI=jdbc:mysql://10.68.112.2:3306/
+    #druid.metadata.storage.connector.createTables=true
+    #druid.metadata.storage.connector.user=root
+    #druid.metadata.storage.connector.password=NmmCDFg4Mi45LOwe
 
-    #
-    # Service discovery
-    #
-    druid.selectors.indexing.serviceName=druid/overlord
-    druid.selectors.coordinator.serviceName=druid/coordinator
-
-    druid.indexer.logs.type=file
-    druid.indexer.logs.directory=/druid/data/indexing-logs
-    druid.lookup.enableLookupSyncOnStartup=false
   volumeMounts:
     - mountPath: /druid/data
       name: data-volume
@@ -94,6 +127,7 @@ spec:
       hostPath:
         path: /tmp/druid/deepstorage
         type: DirectoryOrCreate
+
   env:
     - name: POD_NAME
       valueFrom:
@@ -107,42 +141,74 @@ spec:
   nodes:
     brokers:
       # Optionally specify for running broker as Deployment
-      # kind: Deployment
+      kind: StatefulSet
       nodeType: "broker"
       # Optionally specify for broker nodes
       # imagePullSecrets:
       # - name: tutu
       druid.port: 8088
       nodeConfigMountPath: "/opt/druid/conf/druid/cluster/query/broker"
-      replicas: 1
+      podDisruptionBudgetSpec:
+        maxUnavailable: 1
+      replicas: 2
+      readinessProbe:
+        initialDelaySeconds: 60
+        periodSeconds: 5
+        failureThreshold: 3
+        httpGet:
+          path: /druid/broker/v1/readiness
+          port: 8088
+      env:
+        - name: DRUID_XMS
+          value: 512m
+        - name: DRUID_XMX
+          value: 2048m
       runtime.properties: |
         druid.service=druid/broker
         # HTTP server threads
-        druid.broker.http.numConnections=5
+        druid.broker.http.numConnections=100
         druid.server.http.numThreads=10
         # Processing threads and buffers
-        druid.processing.buffer.sizeBytes=1
-        druid.processing.numMergeBuffers=1
-        druid.processing.numThreads=1
+        druid.processing.buffer.sizeBytes=268435456
+        druid.processing.numMergeBuffers=2
+        druid.processing.numThreads=11
         druid.sql.enable=true
       extra.jvm.options: |-
         -Xmx512M
         -Xms512M
-
     coordinators:
       # Optionally specify for running coordinator as Deployment
-      # kind: Deployment
+      kind: StatefulSet
       nodeType: "coordinator"
       druid.port: 8088
       nodeConfigMountPath: "/opt/druid/conf/druid/cluster/master/coordinator-overlord"
+      podDisruptionBudgetSpec:
+        maxUnavailable: 1
       replicas: 1
+      livenessProbe:
+        initialDelaySeconds: 60
+        periodSeconds: 5
+        failureThreshold: 3
+        httpGet:
+          path: /status/health
+          port: 8088
+      readinessProbe:
+        initialDelaySeconds: 60
+        periodSeconds: 5
+        failureThreshold: 3
+        httpGet:
+          path: /status/health
+          port: 8088
+      env:
+        - name: DRUID_XMS
+          value: 1g
+        - name: DRUID_XMX
+          value: 2048m
       runtime.properties: |
         druid.service=druid/coordinator
-
         # HTTP server threads
-        druid.coordinator.startDelay=PT30S
-        druid.coordinator.period=PT30S
-
+        druid.coordinator.startDelay=PT10S
+        druid.coordinator.period=PT5S
         # Configure this coordinator to also run as Overlord
         druid.coordinator.asOverlord.enabled=true
         druid.coordinator.asOverlord.overlordService=druid/overlord
@@ -151,46 +217,123 @@ spec:
       extra.jvm.options: |-
         -Xmx512M
         -Xms512M
-
     historicals:
+      kind: StatefulSet
       nodeType: "historical"
       druid.port: 8088
       nodeConfigMountPath: "/opt/druid/conf/druid/cluster/data/historical"
-      replicas: 1
+      podDisruptionBudgetSpec:
+        maxUnavailable: 1
+      replicas: 2
+      livenessProbe:
+        initialDelaySeconds: 1800
+        periodSeconds: 5
+        failureThreshold: 3
+        httpGet:
+          path: /status/health
+          port: 8088
+      readinessProbe:
+        httpGet:
+          path: /druid/historical/v1/readiness
+          port: 8088
+        periodSeconds: 10
+        failureThreshold: 18
+      env:
+        - name: DRUID_XMS
+          value: 1500m
+        - name: DRUID_XMX
+          value: 1500m
       runtime.properties: |
         druid.service=druid/historical
-        druid.server.http.numThreads=5
+        druid.server.http.numThreads=10
         druid.processing.buffer.sizeBytes=536870912
-        druid.processing.numMergeBuffers=1
-        druid.processing.numThreads=1
-
+        druid.processing.numMergeBuffers=2
+        druid.processing.numThreads=2
         # Segment storage
-        druid.segmentCache.locations=[{\"path\":\"/druid/data/segments\",\"maxSize\":10737418240}]
-        druid.server.maxSize=10737418240
+        druid.segmentCache.locations=[{\"path\":\"/druid/data/segments\",\"maxSize\":40000000000}]
+        druid.server.maxSize=40000000000
       extra.jvm.options: |-
         -Xmx512M
         -Xms512M
-          
+
+    middlemanagers:
+      druid.port: 8088
+      kind: StatefulSet
+      nodeType: middleManager
+      nodeConfigMountPath: /opt/druid/conf/druid/cluster/data/middleManager
+      env:
+        - name: DRUID_XMX
+          value: 4096m
+        - name: DRUID_XMS
+          value: 4096m
+      podDisruptionBudgetSpec:
+        maxUnavailable: 1
+      replicas: 2
+      livenessProbe:
+        initialDelaySeconds: 60
+        periodSeconds: 5
+        failureThreshold: 3
+        httpGet:
+          path: /status/health
+          port: 8088
+      readinessProbe:
+        initialDelaySeconds: 60
+        periodSeconds: 5
+        failureThreshold: 3
+        httpGet:
+          path: /status/health
+          port: 8088
+      runtime.properties: |
+          druid.service=druid/middleManager
+          druid.worker.capacity=2
+          druid.indexer.runner.javaOpts=-server -Xms2g -Xmx2g -XX:MaxDirectMemorySize=2g -Duser.timezone=UTC -Dfile.encoding=UTF-8 -XX:+ExitOnOutOfMemoryError -Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager
+          druid.indexer.task.baseTaskDir=var/druid/task
+          # HTTP server threads
+          druid.server.http.numThreads=500
+          # Processing threads and buffers on Peons
+          druid.indexer.fork.property.druid.processing.numMergeBuffers=2
+          druid.indexer.fork.property.druid.processing.buffer.sizeBytes=32000000
+          druid.indexer.fork.property.druid.processing.numThreads=2
+
     routers:
+      kind: StatefulSet
       nodeType: "router"
       druid.port: 8088
       nodeConfigMountPath: "/opt/druid/conf/druid/cluster/query/router"
+      podDisruptionBudgetSpec:
+        maxUnavailable: 1
       replicas: 1
+      livenessProbe:
+        initialDelaySeconds: 60
+        periodSeconds: 5
+        failureThreshold: 3
+        httpGet:
+          path: /status/health
+          port: 8088
+      readinessProbe:
+        initialDelaySeconds: 60
+        periodSeconds: 5
+        failureThreshold: 3
+        httpGet:
+          path: /status/health
+          port: 8088
+      env:
+        - name: DRUID_XMX
+          value: 4096m
+        - name: DRUID_XMS
+          value: 4096m
       runtime.properties: |
         druid.service=druid/router
-
         # HTTP proxy
-        druid.router.http.numConnections=10
+        druid.router.http.numConnections=100
         druid.router.http.readTimeout=PT5M
-        druid.router.http.numMaxThreads=10
-        druid.server.http.numThreads=10
-
+        druid.router.http.numMaxThreads=100
+        druid.server.http.numThreads=100
         # Service discovery
         druid.router.defaultBrokerServiceName=druid/broker
         druid.router.coordinatorServiceName=druid/coordinator
-
         # Management proxy to coordinator / overlord: required for unified web console.
-        druid.router.managementProxy.enabled=true       
+        druid.router.managementProxy.enabled=true
       extra.jvm.options: |-
         -Xmx512M
         -Xms512M
